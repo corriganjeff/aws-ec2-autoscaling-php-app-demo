@@ -1,5 +1,58 @@
-Description: Octank PoC Demo
+Description: Octank PoC Demo with ASG
 
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      -
+        Label:
+          default: "VPC Name"
+        Parameters:
+          - VPCName
+      -
+        Label:
+          default: "InstanceDetails"
+        Parameters:
+          - InstanceFlavor
+          - MemcacheInstanceFlavor
+      -
+        Label:
+            default: "Instance Quantities"
+        Parameters:
+            - InstanceQuantity
+            - MemcacheNodeQty
+
+Parameters:
+  VPCName:
+    Type: String
+    Default: vpc-oct-demo-lowercase
+    Description: 'VPC name.'
+  InstanceFlavor:
+    Type: String
+    Default: t3.medium
+    Description: Instance Type
+  MemcacheInstanceFlavor:
+    Type: String
+    Default: cache.r6g.xlarge
+    Description: Instance Type
+  InstanceQuantity:
+    Type: Number
+    Default: 10
+    Description: 'Quantity of App Instances'
+  MemcacheNodeQty:
+    Type: Number
+    Default: 2
+    Description: 'Quantity of App Instances'
+
+Mappings:
+  RegionAndResource:
+    us-east-1:
+      image: ami-0b898040803850657
+    us-east-2:
+      image: ami-05d72852800cbf29e
+    us-west-1:
+      image: ami-0577b787189839998
+    us-west-2:
+      image: ami-0518bb0e75d3619ca
 ## Resources ##
 Resources:
   ## VPC public and private subnets (subnets, route tables, IGW, NAT) ##
@@ -134,12 +187,10 @@ Resources:
           FromPort: '80'
           ToPort: '80'
           CidrIp: 0.0.0.0/0
-          CidrIpv6: ::/0
         - IpProtocol: tcp
           FromPort: '443'
           ToPort: '443'
           CidrIp: 0.0.0.0/0
-          CidrIpv6: ::/0
       VpcId: !Ref PubPrivateVPC
       Tags:
         - Key: Name
@@ -184,45 +235,90 @@ Resources:
       Path: /
       Roles:
         - !Ref EC2Role
-  EC2App:
-    Type: 'AWS::EC2::Instance'
+
+  AppInstances:
+    Type: AWS::AutoScaling::LaunchConfiguration
     DependsOn:
       - EC2InstanceProfile
       - MemCluster
     Properties:
-      ImageId: ami-00dc79254d0461090
-      InstanceType: t2.micro
+      ImageId: !FindInMap
+        - RegionAndResource
+        - !Ref 'AWS::Region'
+        - image
+      InstanceType: !Ref InstanceFlavor
       IamInstanceProfile: !Ref EC2InstanceProfile
-      SubnetId: !Ref PrivateSubnet1
-      SecurityGroupIds:
+      LaunchConfigurationName: AppInstancesLaunchConfiguration
+      SecurityGroups:
         - !Ref WebSecurityGroup
       UserData:
         Fn::Base64:
-          !Sub |
-            #!/bin/bash
-            # Install dependecies
-            sudo yum update -y
-            sudo yum install php php-memcache git -y
-            # Clone repository
-            git clone https://github.com/aws-samples/aws-ec2-autoscaling-php-app-demo.git
-            sudo mv aws-ec2-autoscaling-php-app-demo/src/app/* /var/www/html/
-            sudo mv aws-ec2-autoscaling-php-app-demo/src/image/ /var/www/html/
-            sudo mv aws-ec2-autoscaling-php-app-demo/src/css/ /var/www/html/
-            # Update config files
-            sed -i 's/session.save_handler "files"/session.save_handler "memcache"/g' /etc/httpd/conf.d/php.conf
-            sed -i 's%session.save_path    "/var/lib/php/session"%session.save_path "${MemCluster.ConfigurationEndpoint.Address}:11211"%g' /etc/httpd/conf.d/php.conf
-            # Start apache
-            sudo service httpd start
-            chkconfig httpd on
+            !Sub |
+                #!/bin/bash
+                sudo su
+                echo * soft nofile 65536 >> /etc/security/limits.conf
+                echo * hard nofile 65536 >> /etc/security/limits.conf
+                echo root soft nofile 65536 >> /etc/security/limits.conf
+                echo root hard nofile 65536 >> /etc/security/limits.conf
+                ulimit -n 65536
+                # Install dependecies
+                yum update -y
+                yum install php php-memcache git mod_ssl -y
+                # Clone repository
+                git clone https://github.com/aws-samples/aws-ec2-autoscaling-php-app-demo.git
+                mv aws-ec2-autoscaling-php-app-demo/src/app/* /var/www/html/
+                mv aws-ec2-autoscaling-php-app-demo/src/image/ /var/www/html/
+                mv aws-ec2-autoscaling-php-app-demo/src/css/ /var/www/html/
+                # Update config files
+                sed -i 's/session.save_handler "files"/session.save_handler "memcache"/g' /etc/httpd/conf.d/php.conf
+                sed -i 's%session.save_path    "/var/lib/php/session"%session.save_path "${MemCluster.ConfigurationEndpoint.Address}:11211"%g' /etc/httpd/conf.d/php.conf
+                # Start apache
+                service httpd start
+                wget https://elasticache-downloads.s3.amazonaws.com/ClusterClient/PHP-5.4/latest-64bit
+                tar -zxf latest-64bit AmazonElastiCacheClusterClient-1.0.1/
+                mv AmazonElastiCacheClusterClient-1.0.1/amazon-elasticache-cluster-client.so /usr/lib64/php/modules/
+                grep -qF 'extension=amazon-elasticache-cluster-client.so' /etc/php.d/memcached.ini || echo 'extension=amazon-elasticache-cluster-client.so' | sudo tee --append /etc/php.d/memcached.ini
+                rm -f latest-64bit*
+                cd /usr/lib64
+                sudo ln libsasl2.so.3 libsasl2.so.2
+                chkconfig httpd on
+                service httpd restart
+
+  AppTierAutoScaling:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn: 
+      - AppInstances
+    Properties:
+      AutoScalingGroupName: AppTierAutoScalingGroup
+      DesiredCapacity: !Ref InstanceQuantity
+      MaxSize: !Ref InstanceQuantity
+      MinSize: !Ref InstanceQuantity
+      LaunchConfigurationName: !Ref AppInstances
+      VPCZoneIdentifier:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      TargetGroupARNs:
+        - !Ref TargetGroupALB
       Tags:
         - Key: Name
-          Value: AppInstance
-  TALB:
+          PropagateAtLaunch: true
+          Value: app-instance-asg
+        - Key: project
+          PropagateAtLaunch: true
+          Value: oct-poc
+        - Key: deploy-src
+          PropagateAtLaunch: true
+          Value: oct-cfn-asg
+        - Key: team
+          PropagateAtLaunch: true
+          Value: infra
+
+  TargetGroupALB:
     Type: 'AWS::ElasticLoadBalancingV2::TargetGroup'
     DependsOn:
-      - EC2App
+      - PubPrivateVPC
     Properties:
-      Name: tg-app
+      Name: app-targetgroup
       VpcId: !Ref PubPrivateVPC
       TargetType: instance
       Port: 80
@@ -234,12 +330,18 @@ Resources:
       TargetGroupAttributes:
         - Key: deregistration_delay.timeout_seconds
           Value: 10
-      Targets:
-        - Id: !Ref EC2App
+      Tags:
+        - Key: project
+          Value: oct-poc
+        - Key: deploy-src
+          Value: oct-cfn-app
+        - Key: team
+          Value: infra
+
   ALB:
     Type: 'AWS::ElasticLoadBalancingV2::LoadBalancer'
     DependsOn:
-      - TALB
+      - TargetGroupALB
     Properties:
       Subnets:
         - !Ref PublicSubnet1
@@ -252,7 +354,7 @@ Resources:
     Properties:
       DefaultActions:
         - Type: forward
-          TargetGroupArn: !Ref TALB
+          TargetGroupArn: !Ref TargetGroupALB
       LoadBalancerArn: !Ref ALB
       Port: 80
       Protocol: HTTP
@@ -278,13 +380,13 @@ Resources:
   MemCluster:
     Type: AWS::ElastiCache::CacheCluster
     Properties:
-      CacheNodeType: cache.t2.micro
+      CacheNodeType: !Ref MemcacheInstanceFlavor
       VpcSecurityGroupIds:
         - !Ref MemSecurityGroup
       CacheSubnetGroupName: !Ref MemSubnetGroup
       ClusterName: web-memcached
       Engine: memcached
-      NumCacheNodes: 1
+      NumCacheNodes: !Ref MemcacheNodeQty
       Port: 11211
 
   ## CDN layer (S3 bucket) ##
