@@ -472,6 +472,15 @@ Resources:
       VpcSecurityGroupIds: 
         - !Ref SecurityGroupAuroraRDS
 
+  ##Exec DDL ##
+  DDLExecutor:
+    Type: AWSUtility::CloudFormation::CommandRunner
+    DependsOn: AuroraRDSCluster
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      Command: 
+        Fn::Sub: 'sudo yum install mysql -y && echo "create table test(id INT NOT NULL AUTO_INCREMENT,tracking_id VARCHAR(100) NOT NULL, request_date DATETIME NOT NULL,PRIMARY KEY ( id ));" > ddl.sql && mysql -u admin --password=OctankDemo -D octankdatabase -h "${AuroraRDSCluster.Endpoint.Address}" < ddl.sql > /command-output.txt'
+
 ## Outputs ##
 Outputs:
   PubPrivateVPCID:
@@ -489,3 +498,6 @@ Outputs:
     Value: !Ref S3Static
     Export:
       Name: S3StaticBucket
+  DDLRun:
+    Description: Output from DDL executor
+    Value: Fn::GetAtt: DDLExecutor.Output
