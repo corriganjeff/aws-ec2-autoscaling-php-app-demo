@@ -46,7 +46,7 @@ Parameters:
 Mappings:
   RegionAndResource:
     us-east-1:
-      image: ami-0b898040803850657
+      image: ami-0742b4e673072066f
     us-east-2:
       image: ami-05d72852800cbf29e
     us-west-1:
@@ -195,6 +195,24 @@ Resources:
       Tags:
         - Key: Name
           Value: HTTPSgALB
+  SecurityGroupAuroraRDS:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupName: rds-sg-pvtsubnet-allow
+      GroupDescription: MYSQL/Aurora
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '3306'
+          ToPort: '3306'
+          CidrIp: 172.31.3.0/24
+        - IpProtocol: tcp
+          FromPort: '3306'
+          ToPort: '3306'
+          CidrIp: 172.31.2.0/24
+      VpcId: !Ref PubPrivateVPC
+      Tags:
+        - Key: Name
+          Value: rds-sg-pvtsubnet-allow
   WebSecurityGroup:
     Type: 'AWS::EC2::SecurityGroup'
     Properties:
@@ -263,9 +281,9 @@ Resources:
                 ulimit -n 65536
                 # Install dependecies
                 yum update -y
-                yum install php php-memcache git mod_ssl -y
+                yum install php php-memcache git mod_ssl php-mysql mysql -y
                 # Clone repository
-                git clone https://github.com/aws-samples/aws-ec2-autoscaling-php-app-demo.git
+                git clone https://github.com/corriganjeff/aws-ec2-autoscaling-php-app-demo.git
                 mv aws-ec2-autoscaling-php-app-demo/src/app/* /var/www/html/
                 mv aws-ec2-autoscaling-php-app-demo/src/image/ /var/www/html/
                 mv aws-ec2-autoscaling-php-app-demo/src/css/ /var/www/html/
@@ -282,12 +300,21 @@ Resources:
                 cd /usr/lib64
                 sudo ln libsasl2.so.3 libsasl2.so.2
                 chkconfig httpd on
+                echo extension=pdo.so >> /etc/php.ini
                 service httpd restart
 
   AppTierAutoScaling:
     Type: AWS::AutoScaling::AutoScalingGroup
     DependsOn: 
       - AppInstances
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MaxBatchSize: 1
+        MinSuccessfulInstancesPercent: 68
+        PauseTime: PT30M
+        SuspendProcesses: [HealthCheck, ReplaceUnhealthy, AZRebalance, AlarmNotification,
+          ScheduledActions]
+        WaitOnResourceSignals: 'true'
     Properties:
       AutoScalingGroupName: AppTierAutoScalingGroup
       DesiredCapacity: !Ref InstanceQuantity
@@ -312,6 +339,9 @@ Resources:
         - Key: team
           PropagateAtLaunch: true
           Value: infra
+        - Key: Patch Group
+          PropagateAtLaunch: true
+          Value: ssm-managed-instances
 
   TargetGroupALB:
     Type: 'AWS::ElasticLoadBalancingV2::TargetGroup'
@@ -394,6 +424,53 @@ Resources:
     Type: 'AWS::S3::Bucket'
     Properties:
       BucketName: !Join [-, [!Ref 'AWS::StackName', !Ref 'AWS::AccountId']]
+  
+  DBSubnetGroup: 
+    Type: "AWS::RDS::DBSubnetGroup"
+    Properties: 
+      DBSubnetGroupDescription: subnet-group-octankdatabase
+      SubnetIds: 
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      Tags: 
+        - Key: Name
+          Value: subnet-group-octankdatabase
+
+  ## Aurora MySQL ##
+  AuroraRDSCluster:
+    Type: AWS::RDS::DBCluster
+    DependsOn: SecurityGroupAuroraRDS
+    Properties: 
+      BackupRetentionPeriod: 14
+      DatabaseName: octankdatabase
+      DBClusterIdentifier: octankdatabase-cluster
+      DBClusterParameterGroupName: default.aurora-mysql5.7
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      DeletionProtection: false
+      # EnableCloudwatchLogsExports: 
+      #   - audit
+      #   - error
+      #   - general
+      #   - slowquery
+      EnableHttpEndpoint: true
+      Engine: aurora-mysql
+      EngineMode: serverless
+      EngineVersion: 5.7.mysql_aurora.2.09.2
+      KmsKeyId: arn:aws:kms:us-east-1:290475834234:key/14bd1ab8-e84d-4f48-833f-9c9a250f732b
+      MasterUsername: admin
+      MasterUserPassword: OctankDemo
+      Port: 3306
+      ScalingConfiguration: 
+        AutoPause: true
+        MaxCapacity: 8
+        MinCapacity: 4
+        SecondsUntilAutoPause: 300
+      StorageEncrypted: true
+      Tags: 
+        - Key: testdatabase
+          Value: true
+      VpcSecurityGroupIds: 
+        - !Ref SecurityGroupAuroraRDS
 
 ## Outputs ##
 Outputs:

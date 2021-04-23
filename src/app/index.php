@@ -3,6 +3,24 @@ session_start();
 if (isset($_SESSION['user'])) {
     header("location:welcome.php");
 }
+
+require_once('pdo.php');
+$newGuid = md5(uniqid(rand(), true));
+$dte = gmdate("Y-m-d\TH:i:s\Z");
+
+$sql = "insert into page_hits(tracking_id, request_date) values (?, ?)";
+$stmt= $pdo->prepare($sql);
+$stmt->execute([$newGuid,$dte]);
+/*
+$sql = "select * from page_hits order by request_date desc LIMIT 50";
+$stmt = $pdo->query($sql);
+
+while($row = $stmt->fetch()) {
+        echo $row['id'].",";
+        echo $row['tracking_id'].",";
+        echo $row['request_date']."</br >";
+}
+*/
 ?>
 
 <!DOCTYPE html>

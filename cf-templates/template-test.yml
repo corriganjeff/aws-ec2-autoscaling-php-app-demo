@@ -273,6 +273,15 @@ Resources:
   WorkerAutoScaling:
     Type: AWS::AutoScaling::AutoScalingGroup
     DependsOn: EC2Workers
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MaxBatchSize: 1
+        MinSuccessfulInstancesPercent: 95
+        PauseTime: PT30M
+        SuspendProcesses: [HealthCheck, ReplaceUnhealthy, AZRebalance, AlarmNotification,
+          ScheduledActions]
+        WaitOnResourceSignals: 'true'
+
     Properties:
       AutoScalingGroupName: OctLoadWorkers
       DesiredCapacity: !Ref Workers
