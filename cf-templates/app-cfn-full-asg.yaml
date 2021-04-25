@@ -259,6 +259,7 @@ Resources:
     DependsOn:
       - EC2InstanceProfile
       - MemCluster
+      - AuroraRDSCluster
     Properties:
       ImageId: !FindInMap
         - RegionAndResource
@@ -287,6 +288,24 @@ Resources:
                 mv aws-ec2-autoscaling-php-app-demo/src/app/* /var/www/html/
                 mv aws-ec2-autoscaling-php-app-demo/src/image/ /var/www/html/
                 mv aws-ec2-autoscaling-php-app-demo/src/css/ /var/www/html/
+                #Update PDO file
+                rm -f /var/www/html/pdo.php
+                cat > /var/www/html/pdo.pho <<EOL
+                <?php
+                $dbhost = '"${AuroraRDSCluster.Endpoint.Address}"';
+                $dbport = '3306';
+                $dbname = 'octankdatabase';
+                $charset = 'utf8' ;
+
+                $dsn = "mysql:host={$dbhost};port={$dbport};dbname={$dbname};charset={$charset}";
+                $username = "admin";
+                $password = "OctankDemo";
+
+                $pdo = new PDO($dsn, $username, $password);
+
+                ?>
+                EOL
+                
                 # Update config files
                 sed -i 's/session.save_handler "files"/session.save_handler "memcache"/g' /etc/httpd/conf.d/php.conf
                 sed -i 's%session.save_path    "/var/lib/php/session"%session.save_path "${MemCluster.ConfigurationEndpoint.Address}:11211"%g' /etc/httpd/conf.d/php.conf
@@ -473,13 +492,32 @@ Resources:
         - !Ref SecurityGroupAuroraRDS
 
   ##Exec DDL ##
-  DDLExecutor:
-    Type: AWSUtility::CloudFormation::CommandRunner
+  EC2DBBootstrap:
+    Type: 'AWS::EC2::Instance'
     DependsOn: AuroraRDSCluster
     Properties:
+      ImageId: !FindInMap
+        - RegionAndResource
+        - !Ref 'AWS::Region'
+        - image
+      InstanceType: t3.micro
       SubnetId: !Ref PrivateSubnet1
-      Command: 
-        Fn::Sub: 'sudo yum install mysql -y && echo "create table test(id INT NOT NULL AUTO_INCREMENT,tracking_id VARCHAR(100) NOT NULL, request_date DATETIME NOT NULL,PRIMARY KEY ( id ));" > ddl.sql && mysql -u admin --password=OctankDemo -D octankdatabase -h "${AuroraRDSCluster.Endpoint.Address}" < ddl.sql > /command-output.txt'
+      SecurityGroupIds:
+        - !Ref SecurityGroupAuroraRDS
+      UserData:
+        Fn::Base64:
+            !Sub |
+                #!/bin/bash -xe
+                sudo su
+                yum update -y
+                yum install mysql -y
+                cat >ddl.sql <<EOL
+                create table page_hits(id INT NOT NULL AUTO_INCREMENT,tracking_id VARCHAR(100) NOT NULL, request_date DATETIME NOT NULL,PRIMARY KEY ( id ));" 
+                EOL
+                mysql -u admin --password=OctankDemo -D octankdatabase -h "${AuroraRDSCluster.Endpoint.Address}" < ddl.sql
+      Tags:
+        - Key: Name
+          Value: deletable-RDS-Bootstrapper
 
 ## Outputs ##
 Outputs:
@@ -498,6 +536,4 @@ Outputs:
     Value: !Ref S3Static
     Export:
       Name: S3StaticBucket
-  DDLRun:
-    Description: Output from DDL executor
-    Value: Fn::GetAtt: DDLExecutor.Output
+
