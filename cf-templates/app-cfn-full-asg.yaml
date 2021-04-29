@@ -290,22 +290,22 @@ Resources:
                 mv aws-ec2-autoscaling-php-app-demo/src/css/ /var/www/html/
                 #Update PDO file
                 rm -f /var/www/html/pdo.php
-                cat > /var/www/html/pdo.pho <<EOL
+                cat > /var/www/html/pdo.php <<EOL
                 <?php
-                $dbhost = '"${AuroraRDSCluster.Endpoint.Address}"';
-                $dbport = '3306';
-                $dbname = 'octankdatabase';
-                $charset = 'utf8' ;
+                \$dbhost = '"${AuroraRDSCluster.Endpoint.Address}"';
+                \$dbport = '3306';
+                \$dbname = 'octankdatabase';
+                \$charset = 'utf8' ;
 
-                $dsn = "mysql:host={$dbhost};port={$dbport};dbname={$dbname};charset={$charset}";
-                $username = "admin";
-                $password = "OctankDemo";
+                \$dsn = "mysql:host={\$dbhost};port={\$dbport};dbname={\$dbname};charset={\$charset}";
+                \$username = "admin";
+                \$password = "OctankDemo";
 
-                $pdo = new PDO($dsn, $username, $password);
+                \$pdo = new PDO(\$dsn, \$username, \$password);
 
                 ?>
                 EOL
-                
+
                 # Update config files
                 sed -i 's/session.save_handler "files"/session.save_handler "memcache"/g' /etc/httpd/conf.d/php.conf
                 sed -i 's%session.save_path    "/var/lib/php/session"%session.save_path "${MemCluster.ConfigurationEndpoint.Address}:11211"%g' /etc/httpd/conf.d/php.conf
