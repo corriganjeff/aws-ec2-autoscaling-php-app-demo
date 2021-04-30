@@ -20,6 +20,12 @@ Metadata:
         Parameters:
             - InstanceQuantity
             - MemcacheNodeQty
+      -
+        Label:
+            default: "Tomcat Settings"
+        Parameters:
+            - TCMaxServers
+            - TCStartServers
 
 Parameters:
   VPCName:
@@ -42,6 +48,26 @@ Parameters:
     Type: Number
     Default: 2
     Description: 'Quantity of App Instances'
+  TCMStartServers:
+    Type: Number
+    Default: 8
+    Description: 'StartServers parm- #cpu * 4'
+  TCMaxChildren:
+    Type: Number
+    Default: 16
+    Description: 'MaxChildren - Generically startservers * 2'
+  TCMinSpareServers:
+    Type: Number
+    Default: 8
+    Description: 'MinSpareServers - Generically startservers / 2'
+  TCMaxSpareServers:
+    Type: Number
+    Default: 24
+    Description: 'MaxSpareServers - Generically MinSpareServers * 3'
+  TCMaxRequests:
+    Type: Number
+    Default: 10000
+    Description: 'MaxRequests - Still researching proper tuning'
 
 Mappings:
   RegionAndResource:
@@ -282,7 +308,7 @@ Resources:
                 ulimit -n 65536
                 # Install dependecies
                 yum update -y
-                yum install php php-memcache git mod_ssl php-mysql mysql -y
+                yum install php php-memcache git mod_ssl php-mysql mysql php-fpm mod_fcgid -y
                 # Clone repository
                 git clone https://github.com/corriganjeff/aws-ec2-autoscaling-php-app-demo.git
                 mv aws-ec2-autoscaling-php-app-demo/src/app/* /var/www/html/
@@ -292,7 +318,7 @@ Resources:
                 rm -f /var/www/html/pdo.php
                 cat > /var/www/html/pdo.php <<EOL
                 <?php
-                \$dbhost = '"${AuroraRDSCluster.Endpoint.Address}"';
+                \$dbhost = "${AuroraRDSCluster.Endpoint.Address}";
                 \$dbport = '3306';
                 \$dbname = 'octankdatabase';
                 \$charset = 'utf8' ;
@@ -307,8 +333,43 @@ Resources:
                 EOL
 
                 # Update config files
-                sed -i 's/session.save_handler "files"/session.save_handler "memcache"/g' /etc/httpd/conf.d/php.conf
-                sed -i 's%session.save_path    "/var/lib/php/session"%session.save_path "${MemCluster.ConfigurationEndpoint.Address}:11211"%g' /etc/httpd/conf.d/php.conf
+                echo "cgi.fix_pathinfo=0" >> /etc/php.ini
+                sed -i 's+LoadModule mpm_prefork_module modules/mod_mpm_prefork.so+#LoadModule mpm_prefork_module modules/mod_mpm_prefork.so+g' /etc/httpd/conf.modules.d/00-mpm.conf
+                sed -i 's+#LoadModule mpm_worker_module modules/mod_mpm_worker.so+LoadModule mpm_worker_module modules/mod_mpm_worker.so+g' /etc/httpd/conf.modules.d/00-mpm.conf
+
+                sed -i 's+listen = 127.0.0.1:9000+listen = /run/php-fpm/www.sock+g' /etc/php-fpm.d/www.conf
+                sed -i 's+;listen.owner = nobody+listen.owner = apache+g' /etc/php-fpm.d/www.conf
+                sed -i 's+;listen.group = nobody+listen.group = apache+g' /etc/php-fpm.d/www.conf
+                sed -i 's+;listen.mode = 0666+listen.mode = 0666+g' /etc/php-fpm.d/www.conf
+                #TCMStartServers, TCMaxChildren, TCMinSpareServers, TCMaxSpareServers, TCMaxRequests
+                #300 assuming 4GB, increase from there on larger instance flavors
+                sed -i 's+pm.max_children = 50+pm.max_children = 300+g' /etc/php-fpm.d/www.conf
+                sed -i 's+ = files+ = memcache+g' /etc/php-fpm.d/www.conf
+                sed -i 's+ = /var/lib/php/session+ = "${MemCluster.ConfigurationEndpoint.Address}:11211"+g' /etc/php-fpm.d/www.conf
+                sed -i 's/php_value session.save_handler/#php_value session.save_handler/g' /etc/httpd/conf.d/php.conf
+                sed -i 's/php_value session.save_path/#php_value session.save_path/g' /etc/httpd/conf.d/php.conf
+                
+                cat > /etc/httpd/conf.d/demoapp.conf <<EOL
+                <VirtualHost *:80>
+                    ServerAdmin admin@demo.aws
+                    DocumentRoot /var/www/html
+                 
+                    ServerName octank.authz.limited
+                    ServerAlias octank.authz.limited
+
+                    <Proxy "unix:/run/php-fpm/www.sock|fcgi://php-fpm">
+                       ProxySet disablereuse=off
+                     </Proxy>
+                 
+                     <FilesMatch \.php$>
+                           SetHandler proxy:fcgi://php-fpm
+                     </FilesMatch>
+                 
+                    ErrorLog logs/demo-error.log
+                    CustomLog logs/demo-access.log combined
+                </VirtualHost>
+                EOL
+
                 # Start apache
                 service httpd start
                 wget https://elasticache-downloads.s3.amazonaws.com/ClusterClient/PHP-5.4/latest-64bit
@@ -319,7 +380,8 @@ Resources:
                 cd /usr/lib64
                 sudo ln libsasl2.so.3 libsasl2.so.2
                 chkconfig httpd on
-                echo extension=pdo.so >> /etc/php.ini
+                chkconfig php-fpm on
+                service php-fpm start
                 service httpd restart
 
   AppTierAutoScaling:
