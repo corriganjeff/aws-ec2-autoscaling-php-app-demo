@@ -50,7 +50,7 @@ Parameters:
   MemcacheNodeQty:
     Type: Number
     Default: 2
-    Description: 'Quantity of App Instances'
+    Description: 'Quantity of MemCachedClusterNodes'
   TCStartServers:
     Type: Number
     Default: 8
@@ -344,14 +344,30 @@ Resources:
                 sed -i 's+;listen.owner = nobody+listen.owner = apache+g' /etc/php-fpm.d/www.conf
                 sed -i 's+;listen.group = nobody+listen.group = apache+g' /etc/php-fpm.d/www.conf
                 sed -i 's+;listen.mode = 0666+listen.mode = 0666+g' /etc/php-fpm.d/www.conf
-                #TCMStartServers, TCMaxChildren, TCMinSpareServers, TCMaxSpareServers, TCMaxRequests
+
                 #300 assuming 4GB, increase from there on larger instance flavors
-                sed -i 's+pm.max_children = 50+pm.max_children = 300+g' /etc/php-fpm.d/www.conf
+                #TCStartServers, TCMaxChildren, TCMinSpareServers, TCMaxSpareServers, TCMaxRequests
+                sed -i 's+pm = dynamic+pm = static+g' /etc/php-fpm.d/www.conf
+                sed -i 's+pm.start_servers = 5+pm.start_servers = ${TCStartServers}+g' /etc/php-fpm.d/www.conf
+                sed -i 's+pm.max_children = 5+pm.max_children = ${TCMaxChildren}+g' /etc/php-fpm.d/www.conf
+                sed -i 's+pm.min_spare_servers = 5+pm.min_spare_servers = ${TCMinSpareServers}+g' /etc/php-fpm.d/www.conf
+                sed -i 's+pm.max_spare_servers = 5+pm.max_spare_servers = ${TCMaxSpareServers}+g' /etc/php-fpm.d/www.conf
+                sed -i 's+;pm.max_requests = 500+pm.max_requests = ${TCMaxRequests}+g' /etc/php-fpm.d/www.conf
+                #enable the pm status page. 
+                sed -i 's+;pm.status_path+pm.status_path+g' /etc/php-fpm.d/www.conf
+                
+                #some emergency settings. 
+                #echo "emergency_restart_threshold = 10" >> /etc/php-fpm.d/www.conf
+                #echo "emergency_restart_interval = 1m" >> /etc/php-fpm.d/www.conf
+                #echo "process_control_timeout = 10s" >> /etc/php-fpm.d/www.conf
+
+                #setup memcached
                 sed -i 's+ = files+ = memcache+g' /etc/php-fpm.d/www.conf
                 sed -i 's+ = /var/lib/php/session+ = "${MemCluster.ConfigurationEndpoint.Address}:11211"+g' /etc/php-fpm.d/www.conf
                 sed -i 's/php_value session.save_handler/#php_value session.save_handler/g' /etc/httpd/conf.d/php.conf
                 sed -i 's/php_value session.save_path/#php_value session.save_path/g' /etc/httpd/conf.d/php.conf
                 
+                #create httpd VirtualHost
                 cat > /etc/httpd/conf.d/demoapp.conf <<EOL
                 <VirtualHost *:80>
                     ServerAdmin admin@demo.aws
