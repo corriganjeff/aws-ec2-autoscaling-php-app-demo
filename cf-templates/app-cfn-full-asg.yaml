@@ -24,8 +24,11 @@ Metadata:
         Label:
             default: "Tomcat Settings"
         Parameters:
-            - TCMaxServers
             - TCStartServers
+            - TCMaxChildren
+            - TCMinSpareServers
+            - TCMaxSpareServers
+            - TCMaxRequests
 
 Parameters:
   VPCName:
@@ -48,7 +51,7 @@ Parameters:
     Type: Number
     Default: 2
     Description: 'Quantity of App Instances'
-  TCMStartServers:
+  TCStartServers:
     Type: Number
     Default: 8
     Description: 'StartServers parm- #cpu * 4'
