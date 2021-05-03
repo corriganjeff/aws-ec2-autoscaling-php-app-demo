@@ -22,7 +22,7 @@ Metadata:
             - MemcacheNodeQty
       -
         Label:
-            default: "Tomcat Settings"
+            default: "Apache/PHP-FPM Settings"
         Parameters:
             - TCStartServers
             - TCMaxChildren
@@ -400,6 +400,11 @@ Resources:
                 sudo ln libsasl2.so.3 libsasl2.so.2
                 chkconfig httpd on
                 chkconfig php-fpm on
+
+                #apache to MemCached
+                #echo "CacheEnable socache /" >> /etc/httpd/conf/httpd.conf
+                #echo "CacheSocache memcache:mem1.example.com:11211,mem2.example.com:11212"
+
                 service php-fpm start
                 service httpd restart
 
