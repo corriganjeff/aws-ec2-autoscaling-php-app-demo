@@ -1,0 +1,625 @@
+Description: Octank PoC Demo with ASG
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      -
+        Label:
+          default: "VPC Name"
+        Parameters:
+          - VPCName
+      -
+        Label:
+          default: "InstanceDetails"
+        Parameters:
+          - InstanceFlavor
+          - MemcacheInstanceFlavor
+      -
+        Label:
+            default: "Instance Quantities"
+        Parameters:
+            - InstanceQuantity
+            - MemcacheNodeQty
+      -
+        Label:
+            default: "Apache/PHP-FPM Settings"
+        Parameters:
+            - TCStartServers
+            - TCMaxChildren
+            - TCMinSpareServers
+            - TCMaxSpareServers
+            - TCMaxRequests
+
+Parameters:
+  VPCName:
+    Type: String
+    Default: vpc-oct-demo-lowercase
+    Description: 'VPC name.'
+  InstanceFlavor:
+    Type: String
+    Default: t3.medium
+    Description: Instance Type
+  MemcacheInstanceFlavor:
+    Type: String
+    Default: cache.r6g.xlarge
+    Description: Instance Type
+  InstanceQuantity:
+    Type: Number
+    Default: 10
+    Description: 'Quantity of App Instances'
+  MemcacheNodeQty:
+    Type: Number
+    Default: 2
+    Description: 'Quantity of MemCachedClusterNodes'
+  TCStartServers:
+    Type: Number
+    Default: 8
+    Description: 'StartServers parm- #cpu * 4'
+  TCMaxChildren:
+    Type: Number
+    Default: 16
+    Description: 'MaxChildren - Generically startservers * 2'
+  TCMinSpareServers:
+    Type: Number
+    Default: 8
+    Description: 'MinSpareServers - Generically startservers / 2'
+  TCMaxSpareServers:
+    Type: Number
+    Default: 24
+    Description: 'MaxSpareServers - Generically MinSpareServers * 3'
+  TCMaxRequests:
+    Type: Number
+    Default: 10000
+    Description: 'MaxRequests - Still researching proper tuning'
+
+Mappings:
+  RegionAndResource:
+    us-east-1:
+      image: ami-0742b4e673072066f
+    us-east-2:
+      image: ami-05d72852800cbf29e
+    us-west-1:
+      image: ami-0577b787189839998
+    us-west-2:
+      image: ami-0518bb0e75d3619ca
+## Resources ##
+Resources:
+  ## VPC public and private subnets (subnets, route tables, IGW, NAT) ##
+  PubPrivateVPC:
+    Type: 'AWS::EC2::VPC'
+    Properties:
+      CidrBlock: 172.31.0.0/16
+      Tags:
+        - Key: Name
+          Value: !Join [_, [!Ref 'AWS::StackName', VPC]]
+  PublicSubnet1:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      VpcId: !Ref PubPrivateVPC
+      AvailabilityZone: !Select
+        - '0'
+        - !GetAZs ''
+      CidrBlock: 172.31.0.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Join [_, [!Ref 'AWS::StackName', pubsub1]]
+  PublicSubnet2:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      AvailabilityZone: !Select
+        - '1'
+        - !GetAZs ''
+      VpcId: !Ref PubPrivateVPC
+      CidrBlock: 172.31.1.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Join [_, [!Ref 'AWS::StackName', pubsub2]]
+  PrivateSubnet1:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      VpcId: !Ref PubPrivateVPC
+      AvailabilityZone: !Select
+        - '0'
+        - !GetAZs ''
+      CidrBlock: 172.31.3.0/24
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Join [_, [!Ref 'AWS::StackName', pvtsub1]]
+  PrivateSubnet2:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      VpcId: !Ref PubPrivateVPC
+      AvailabilityZone: !Select
+        - '1'
+        - !GetAZs ''
+      CidrBlock: 172.31.2.0/24
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Join [_, [!Ref 'AWS::StackName', pvtsub2]]
+  InternetGateway:
+    Type: 'AWS::EC2::InternetGateway'
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Join [_, [!Ref 'AWS::StackName', IGW]]
+  GatewayToInternet:
+    Type: 'AWS::EC2::VPCGatewayAttachment'
+    Properties:
+      VpcId: !Ref PubPrivateVPC
+      InternetGatewayId: !Ref InternetGateway
+  PublicRouteTable:
+    Type: 'AWS::EC2::RouteTable'
+    Properties:
+      VpcId: !Ref PubPrivateVPC
+  PublicRoute:
+    Type: 'AWS::EC2::Route'
+    DependsOn: GatewayToInternet
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+  PublicSubnet1RouteTableAssociation:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+  PublicSubnet2RouteTableAssociation:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+  NatGateway:
+    Type: "AWS::EC2::NatGateway"
+    DependsOn: NatPublicIP
+    Properties:
+      AllocationId: !GetAtt NatPublicIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+  NatPublicIP:
+    Type: "AWS::EC2::EIP"
+    DependsOn: PubPrivateVPC
+    Properties:
+      Domain: vpc
+  PrivateRouteTable:
+    Type: 'AWS::EC2::RouteTable'
+    Properties:
+      VpcId: !Ref PubPrivateVPC
+  PrivateRoute:
+    Type: 'AWS::EC2::Route'
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+  PrivateSubnet1RouteTableAssociation:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable
+  PrivateSubnet2RouteTableAssociation:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable
+  
+
+  ## App layer (EC2 instance, ALB, Security groups, EC2 SSM Role) ##
+  SecurityGroupHTTPALB:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupName: HTTP-sg-ALB
+      GroupDescription: HTTP(S)
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '80'
+          ToPort: '80'
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: '443'
+          ToPort: '443'
+          CidrIp: 0.0.0.0/0
+      VpcId: !Ref PubPrivateVPC
+      Tags:
+        - Key: Name
+          Value: HTTPSgALB
+  SecurityGroupAuroraRDS:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupName: rds-sg-pvtsubnet-allow
+      GroupDescription: MYSQL/Aurora
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '3306'
+          ToPort: '3306'
+          CidrIp: 172.31.3.0/24
+        - IpProtocol: tcp
+          FromPort: '3306'
+          ToPort: '3306'
+          CidrIp: 172.31.2.0/24
+      VpcId: !Ref PubPrivateVPC
+      Tags:
+        - Key: Name
+          Value: rds-sg-pvtsubnet-allow
+  WebSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupName: secgroup-sg-instc-http-traffic
+      GroupDescription: HTTP(S)
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '80'
+          ToPort: '80'
+          SourceSecurityGroupId: !Ref SecurityGroupHTTPALB
+        - IpProtocol: tcp
+          FromPort: '443'
+          ToPort: '443'
+          SourceSecurityGroupId: !Ref SecurityGroupHTTPALB
+      VpcId: !Ref PubPrivateVPC
+      Tags:
+        - Key: Name
+          Value: WebSg
+  EC2Role:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore'
+      RoleName: EC2-SSM-SSH
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+  EC2InstanceProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      Path: /
+      Roles:
+        - !Ref EC2Role
+
+  AppInstances:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    DependsOn:
+      - EC2InstanceProfile
+      - MemCluster
+      - AuroraRDSCluster
+    Properties:
+      ImageId: !FindInMap
+        - RegionAndResource
+        - !Ref 'AWS::Region'
+        - image
+      InstanceType: !Ref InstanceFlavor
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      LaunchConfigurationName: AppInstancesLaunchConfiguration
+      SecurityGroups:
+        - !Ref WebSecurityGroup
+      UserData:
+        Fn::Base64:
+            !Sub |
+                #!/bin/bash
+                sudo su
+                echo * soft nofile 65536 >> /etc/security/limits.conf
+                echo * hard nofile 65536 >> /etc/security/limits.conf
+                echo root soft nofile 65536 >> /etc/security/limits.conf
+                echo root hard nofile 65536 >> /etc/security/limits.conf
+                ulimit -n 65536
+                # Install dependecies
+                yum update -y
+                yum install php php-memcache git mod_ssl php-mysql mysql php-fpm mod_fcgid -y
+                # Clone repository
+                git clone https://github.com/corriganjeff/aws-ec2-autoscaling-php-app-demo.git
+                mv aws-ec2-autoscaling-php-app-demo/src/app/* /var/www/html/
+                mv aws-ec2-autoscaling-php-app-demo/src/image/ /var/www/html/
+                mv aws-ec2-autoscaling-php-app-demo/src/css/ /var/www/html/
+                #Update PDO file
+                rm -f /var/www/html/pdo.php
+                cat > /var/www/html/pdo.php <<EOL
+                <?php
+                \$dbhost = "${AuroraRDSCluster.Endpoint.Address}";
+                \$dbport = '3306';
+                \$dbname = 'octankdatabase';
+                \$charset = 'utf8' ;
+
+                \$dsn = "mysql:host={\$dbhost};port={\$dbport};dbname={\$dbname};charset={\$charset}";
+                \$username = "admin";
+                \$password = "OctankDemo";
+
+                \$pdo = new PDO(\$dsn, \$username, \$password);
+
+                ?>
+                EOL
+
+                # Update config files
+                echo "cgi.fix_pathinfo=0" >> /etc/php.ini
+                sed -i 's+LoadModule mpm_prefork_module modules/mod_mpm_prefork.so+#LoadModule mpm_prefork_module modules/mod_mpm_prefork.so+g' /etc/httpd/conf.modules.d/00-mpm.conf
+                sed -i 's+#LoadModule mpm_worker_module modules/mod_mpm_worker.so+LoadModule mpm_worker_module modules/mod_mpm_worker.so+g' /etc/httpd/conf.modules.d/00-mpm.conf
+
+                sed -i 's+listen = 127.0.0.1:9000+listen = /run/php-fpm/www.sock+g' /etc/php-fpm.d/www.conf
+                sed -i 's+;listen.owner = nobody+listen.owner = apache+g' /etc/php-fpm.d/www.conf
+                sed -i 's+;listen.group = nobody+listen.group = apache+g' /etc/php-fpm.d/www.conf
+                sed -i 's+;listen.mode = 0666+listen.mode = 0666+g' /etc/php-fpm.d/www.conf
+
+                #300 assuming 4GB, increase from there on larger instance flavors
+                #TCStartServers, TCMaxChildren, TCMinSpareServers, TCMaxSpareServers, TCMaxRequests
+                sed -i 's+pm = dynamic+pm = static+g' /etc/php-fpm.d/www.conf
+                sed -i 's+pm.start_servers = 5+pm.start_servers = ${TCStartServers}+g' /etc/php-fpm.d/www.conf
+                sed -i 's+pm.max_children = 5+pm.max_children = ${TCMaxChildren}+g' /etc/php-fpm.d/www.conf
+                sed -i 's+pm.min_spare_servers = 5+pm.min_spare_servers = ${TCMinSpareServers}+g' /etc/php-fpm.d/www.conf
+                sed -i 's+pm.max_spare_servers = 5+pm.max_spare_servers = ${TCMaxSpareServers}+g' /etc/php-fpm.d/www.conf
+                sed -i 's+;pm.max_requests = 500+pm.max_requests = ${TCMaxRequests}+g' /etc/php-fpm.d/www.conf
+                #enable the pm status page. 
+                sed -i 's+;pm.status_path+pm.status_path+g' /etc/php-fpm.d/www.conf
+                
+                #some emergency settings. 
+                #echo "emergency_restart_threshold = 10" >> /etc/php-fpm.d/www.conf
+                #echo "emergency_restart_interval = 1m" >> /etc/php-fpm.d/www.conf
+                #echo "process_control_timeout = 10s" >> /etc/php-fpm.d/www.conf
+
+                #setup memcached
+                sed -i 's+ = files+ = memcache+g' /etc/php-fpm.d/www.conf
+                sed -i 's+ = /var/lib/php/session+ = "${MemCluster.ConfigurationEndpoint.Address}:11211"+g' /etc/php-fpm.d/www.conf
+                sed -i 's/php_value session.save_handler/#php_value session.save_handler/g' /etc/httpd/conf.d/php.conf
+                sed -i 's/php_value session.save_path/#php_value session.save_path/g' /etc/httpd/conf.d/php.conf
+                
+                #create httpd VirtualHost
+                cat > /etc/httpd/conf.d/demoapp.conf <<EOL
+                <VirtualHost *:80>
+                    ServerAdmin admin@demo.aws
+                    DocumentRoot /var/www/html
+                 
+                    ServerName octank.authz.limited
+                    ServerAlias octank.authz.limited
+
+                    <Proxy "unix:/run/php-fpm/www.sock|fcgi://php-fpm">
+                       ProxySet disablereuse=off
+                     </Proxy>
+                 
+                     <FilesMatch \.php$>
+                           SetHandler proxy:fcgi://php-fpm
+                     </FilesMatch>
+                 
+                    ErrorLog logs/demo-error.log
+                    CustomLog logs/demo-access.log combined
+                </VirtualHost>
+                EOL
+
+                # Start apache
+                service httpd start
+                wget https://elasticache-downloads.s3.amazonaws.com/ClusterClient/PHP-5.4/latest-64bit
+                tar -zxf latest-64bit AmazonElastiCacheClusterClient-1.0.1/
+                mv AmazonElastiCacheClusterClient-1.0.1/amazon-elasticache-cluster-client.so /usr/lib64/php/modules/
+                grep -qF 'extension=amazon-elasticache-cluster-client.so' /etc/php.d/memcached.ini || echo 'extension=amazon-elasticache-cluster-client.so' | sudo tee --append /etc/php.d/memcached.ini
+                rm -f latest-64bit*
+                cd /usr/lib64
+                sudo ln libsasl2.so.3 libsasl2.so.2
+                chkconfig httpd on
+                chkconfig php-fpm on
+
+                #apache to MemCached
+                #echo "CacheEnable socache /" >> /etc/httpd/conf/httpd.conf
+                #echo "CacheSocache memcache:mem1.example.com:11211,mem2.example.com:11212"
+
+                service php-fpm start
+                service httpd restart
+
+  AppTierAutoScaling:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn: 
+      - AppInstances
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MaxBatchSize: 1
+        MinSuccessfulInstancesPercent: 68
+        PauseTime: PT30M
+        SuspendProcesses: [HealthCheck, ReplaceUnhealthy, AZRebalance, AlarmNotification,
+          ScheduledActions]
+        WaitOnResourceSignals: 'true'
+    Properties:
+      AutoScalingGroupName: AppTierAutoScalingGroup
+      DesiredCapacity: !Ref InstanceQuantity
+      MaxSize: !Ref InstanceQuantity
+      MinSize: !Ref InstanceQuantity
+      LaunchConfigurationName: !Ref AppInstances
+      VPCZoneIdentifier:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      TargetGroupARNs:
+        - !Ref TargetGroupALB
+      Tags:
+        - Key: Name
+          PropagateAtLaunch: true
+          Value: app-instance-asg
+        - Key: project
+          PropagateAtLaunch: true
+          Value: oct-poc
+        - Key: deploy-src
+          PropagateAtLaunch: true
+          Value: oct-cfn-asg
+        - Key: team
+          PropagateAtLaunch: true
+          Value: infra
+        - Key: Patch Group
+          PropagateAtLaunch: true
+          Value: ssm-managed-instances
+
+  TargetGroupALB:
+    Type: 'AWS::ElasticLoadBalancingV2::TargetGroup'
+    DependsOn:
+      - PubPrivateVPC
+    Properties:
+      Name: app-targetgroup
+      VpcId: !Ref PubPrivateVPC
+      TargetType: instance
+      Port: 80
+      Protocol: HTTP
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      HealthCheckTimeoutSeconds: 2
+      HealthCheckIntervalSeconds: 5
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: 10
+      Tags:
+        - Key: project
+          Value: oct-poc
+        - Key: deploy-src
+          Value: oct-cfn-app
+        - Key: team
+          Value: infra
+
+  ALB:
+    Type: 'AWS::ElasticLoadBalancingV2::LoadBalancer'
+    DependsOn:
+      - TargetGroupALB
+    Properties:
+      Subnets:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      Name: alb-app
+      SecurityGroups:
+        - !Ref SecurityGroupHTTPALB
+  ALBListener:
+    Type: 'AWS::ElasticLoadBalancingV2::Listener'
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroupALB
+      LoadBalancerArn: !Ref ALB
+      Port: 80
+      Protocol: HTTP
+
+  ## Data layer (Elasticache memcached node, RDS MySQL) ##
+  MemSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: Security Group for Memcached
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '11211'
+          ToPort: '11211'
+          SourceSecurityGroupId: !Ref WebSecurityGroup
+      VpcId: !Ref PubPrivateVPC
+  MemSubnetGroup:
+    Type: 'AWS::ElastiCache::SubnetGroup'
+    Properties:
+      Description: Subnet Group for Memcached
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+  MemCluster:
+    Type: AWS::ElastiCache::CacheCluster
+    Properties:
+      CacheNodeType: !Ref MemcacheInstanceFlavor
+      VpcSecurityGroupIds:
+        - !Ref MemSecurityGroup
+      CacheSubnetGroupName: !Ref MemSubnetGroup
+      ClusterName: web-memcached
+      Engine: memcached
+      NumCacheNodes: !Ref MemcacheNodeQty
+      Port: 11211
+
+  ## CDN layer (S3 bucket) ##
+  S3Static:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      BucketName: !Join [-, [!Ref 'AWS::StackName', !Ref 'AWS::AccountId']]
+  
+  DBSubnetGroup: 
+    Type: "AWS::RDS::DBSubnetGroup"
+    Properties: 
+      DBSubnetGroupDescription: subnet-group-octankdatabase
+      SubnetIds: 
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      Tags: 
+        - Key: Name
+          Value: subnet-group-octankdatabase
+
+  ## Aurora MySQL ##
+  AuroraRDSCluster:
+    Type: AWS::RDS::DBCluster
+    DependsOn: SecurityGroupAuroraRDS
+    Properties: 
+      BackupRetentionPeriod: 14
+      DatabaseName: octankdatabase
+      DBClusterIdentifier: octankdatabase-cluster
+      DBClusterParameterGroupName: default.aurora-mysql5.7
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      DeletionProtection: false
+      # EnableCloudwatchLogsExports: 
+      #   - audit
+      #   - error
+      #   - general
+      #   - slowquery
+      EnableHttpEndpoint: true
+      Engine: aurora-mysql
+      EngineMode: serverless
+      EngineVersion: 5.7.mysql_aurora.2.09.2
+      KmsKeyId: arn:aws:kms:us-east-1:290475834234:key/14bd1ab8-e84d-4f48-833f-9c9a250f732b
+      MasterUsername: admin
+      MasterUserPassword: OctankDemo
+      Port: 3306
+      ScalingConfiguration: 
+        AutoPause: true
+        MaxCapacity: 8
+        MinCapacity: 4
+        SecondsUntilAutoPause: 300
+      StorageEncrypted: true
+      Tags: 
+        - Key: testdatabase
+          Value: true
+      VpcSecurityGroupIds: 
+        - !Ref SecurityGroupAuroraRDS
+
+  ##Exec DDL ##
+  EC2DBBootstrap:
+    Type: 'AWS::EC2::Instance'
+    DependsOn: AuroraRDSCluster
+    Properties:
+      ImageId: !FindInMap
+        - RegionAndResource
+        - !Ref 'AWS::Region'
+        - image
+      InstanceType: t3.micro
+      SubnetId: !Ref PrivateSubnet1
+      SecurityGroupIds:
+        - !Ref SecurityGroupAuroraRDS
+      UserData:
+        Fn::Base64:
+            !Sub |
+                #!/bin/bash -xe
+                sudo su
+                yum update -y
+                yum install mysql -y
+                cat >ddl.sql <<EOL
+                create table page_hits(id INT NOT NULL AUTO_INCREMENT,tracking_id VARCHAR(100) NOT NULL, request_date DATETIME NOT NULL,PRIMARY KEY ( id ));" 
+                EOL
+                mysql -u admin --password=OctankDemo -D octankdatabase -h "${AuroraRDSCluster.Endpoint.Address}" < ddl.sql
+      Tags:
+        - Key: Name
+          Value: deletable-RDS-Bootstrapper
+
+## Outputs ##
+Outputs:
+  PubPrivateVPCID:
+    Description: VPC ID
+    Value: !Ref "PubPrivateVPC"
+    Export:
+      Name: AppVPCID
+  ALBDNS:
+    Description: URL to access the application
+    Value: !GetAtt ALB.DNSName
+    Export:
+      Name: ALBAppURL
+  StaticBucket:
+    Description: Static assets
+    Value: !Ref S3Static
+    Export:
+      Name: S3StaticBucket
+
