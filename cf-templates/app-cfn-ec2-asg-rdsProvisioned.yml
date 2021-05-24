@@ -1,3 +1,14 @@
+###############################################
+##
+## For demo purposes only
+##
+##
+## !! Not to be used in production environments !!
+##
+## Author: Jeff Corrigan, iamjeffc@
+##
+##
+
 Description: Octank PoC Demo with ASG
 
 Metadata:
@@ -12,14 +23,16 @@ Metadata:
         Label:
           default: "InstanceDetails"
         Parameters:
-          - InstanceFlavor
+          - AppInstanceFlavor
           - MemcacheInstanceFlavor
+          - RDSInstanceFlavor
       -
         Label:
             default: "Instance Quantities"
         Parameters:
             - InstanceQuantity
             - MemcacheNodeQty
+            - RDSReadNodeQty
       -
         Label:
             default: "Apache/PHP-FPM Settings"
@@ -35,14 +48,18 @@ Parameters:
     Type: String
     Default: vpc-oct-demo-lowercase
     Description: 'VPC name.'
-  InstanceFlavor:
+  AppInstanceFlavor:
     Type: String
     Default: t3.medium
-    Description: Instance Type
+    Description: 'Application Instance type'
   MemcacheInstanceFlavor:
     Type: String
     Default: cache.r6g.xlarge
-    Description: Instance Type
+    Description: 'Memcache Instance type'
+  RDSInstanceFlavor:
+    Type: String
+    Default: db.r6g.large
+    Description: 'RDS Instance type - lg.2/16,4xlg 16/128'
   InstanceQuantity:
     Type: Number
     Default: 10
@@ -51,6 +68,10 @@ Parameters:
     Type: Number
     Default: 2
     Description: 'Quantity of MemCachedClusterNodes'
+  RDSReadNodeQty:
+    Type: Number
+    Default: 1
+    Description: 'Quantity of RDS Read nodes to build (not impld yet)'
   TCStartServers:
     Type: Number
     Default: 8
@@ -140,6 +161,18 @@ Resources:
       Tags:
         - Key: Name
           Value: !Join [_, [!Ref 'AWS::StackName', pvtsub2]]
+  PrivateSubnet3:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      VpcId: !Ref PubPrivateVPC
+      AvailabilityZone: !Select
+        - '3'
+        - !GetAZs ''
+      CidrBlock: 172.31.4.0/24
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Join [_, [!Ref 'AWS::StackName', pvtsub3]]
   InternetGateway:
     Type: 'AWS::EC2::InternetGateway'
     Properties:
@@ -238,6 +271,10 @@ Resources:
           FromPort: '3306'
           ToPort: '3306'
           CidrIp: 172.31.2.0/24
+        - IpProtocol: tcp
+          FromPort: '3306'
+          ToPort: '3306'
+          CidrIp: 172.31.4.0/24
       VpcId: !Ref PubPrivateVPC
       Tags:
         - Key: Name
@@ -294,7 +331,7 @@ Resources:
         - RegionAndResource
         - !Ref 'AWS::Region'
         - image
-      InstanceType: !Ref InstanceFlavor
+      InstanceType: !Ref AppInstanceFlavor
       IamInstanceProfile: !Ref EC2InstanceProfile
       LaunchConfigurationName: AppInstancesLaunchConfiguration
       SecurityGroups:
@@ -378,6 +415,7 @@ Resources:
 
                     <Proxy "unix:/run/php-fpm/www.sock|fcgi://php-fpm">
                        ProxySet disablereuse=off
+                       ProxySet timeout=30
                      </Proxy>
                  
                      <FilesMatch \.php$>
@@ -537,11 +575,31 @@ Resources:
       SubnetIds: 
         - !Ref PrivateSubnet1
         - !Ref PrivateSubnet2
+        - !Ref PrivateSubnet3
       Tags: 
         - Key: Name
           Value: subnet-group-octankdatabase
 
   ## Aurora MySQL ##
+  RDSClusterParameterGroup:
+    Type: 'AWS::RDS::DBClusterParameterGroup'
+    Properties:
+      Description: CFN Aurora-MySQL ParmGroup
+      Family: aurora-mysql5.7
+      Parameters:
+        server_audit_logging: 1
+
+  RDSInstanceParameterGroup:
+    Type: 'AWS::RDS::DBParameterGroup'
+    Properties:
+      Description: CFN Aurora-MySQL ParmGroup
+      Family: aurora-mysql5.7
+      Parameters:
+        sql_mode: IGNORE_SPACE
+        max_allowed_packet: 1024
+        innodb_buffer_pool_size: '{DBInstanceClassMemory*3/4}'
+        max_connections: 5000
+
   AuroraRDSCluster:
     Type: AWS::RDS::DBCluster
     DependsOn: SecurityGroupAuroraRDS
@@ -549,33 +607,68 @@ Resources:
       BackupRetentionPeriod: 14
       DatabaseName: octankdatabase
       DBClusterIdentifier: octankdatabase-cluster
-      DBClusterParameterGroupName: default.aurora-mysql5.7
+      DBClusterParameterGroupName: !Ref RDSClusterParameterGroup
+      #DBClusterParameterGroupName: default.aurora-mysql5.7
       DBSubnetGroupName: !Ref DBSubnetGroup
       DeletionProtection: false
-      # EnableCloudwatchLogsExports: 
-      #   - audit
-      #   - error
-      #   - general
-      #   - slowquery
+      EnableCloudwatchLogsExports: 
+        - audit
+        - error
+        - general
+        - slowquery
       EnableHttpEndpoint: true
       Engine: aurora-mysql
-      EngineMode: serverless
+      EngineMode: provisioned
       EngineVersion: 5.7.mysql_aurora.2.09.2
       KmsKeyId: arn:aws:kms:us-east-1:290475834234:key/14bd1ab8-e84d-4f48-833f-9c9a250f732b
       MasterUsername: admin
       MasterUserPassword: OctankDemo
       Port: 3306
-      ScalingConfiguration: 
-        AutoPause: true
-        MaxCapacity: 8
-        MinCapacity: 4
-        SecondsUntilAutoPause: 300
       StorageEncrypted: true
       Tags: 
         - Key: testdatabase
           Value: true
       VpcSecurityGroupIds: 
         - !Ref SecurityGroupAuroraRDS
+
+  InstanceOne:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceClass: !Ref RDSInstanceFlavor
+      DBClusterIdentifier: !Ref AuroraRDSCluster
+      Engine: aurora-mysql
+      EngineVersion: 5.7.mysql_aurora.2.09.2
+      DBParameterGroupName: !Ref RDSInstanceParameterGroup
+      AvailabilityZone: !Select
+        - '0'
+        - !GetAZs ''
+      PubliclyAccessible: false
+
+  InstanceTwo:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceClass: !Ref RDSInstanceFlavor
+      DBClusterIdentifier: !Ref AuroraRDSCluster
+      Engine: aurora-mysql
+      EngineVersion: 5.7.mysql_aurora.2.09.2
+      DBParameterGroupName: !Ref RDSInstanceParameterGroup
+      AvailabilityZone: !Select
+        - '1'
+        - !GetAZs ''
+      PubliclyAccessible: false
+
+  InstanceThree:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceClass: !Ref RDSInstanceFlavor
+      DBClusterIdentifier: !Ref AuroraRDSCluster
+      Engine: aurora-mysql
+      EngineVersion: 5.7.mysql_aurora.2.09.2
+      DBParameterGroupName: !Ref RDSInstanceParameterGroup
+      AvailabilityZone: !Select
+        - '3'
+        - !GetAZs ''
+      PubliclyAccessible: false
 
   ##Exec DDL ##
   EC2DBBootstrap:
